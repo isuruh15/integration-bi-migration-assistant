@@ -2,8 +2,8 @@ import ballerina/http;
 import ballerina/log;
 
 public type Attributes record {|
-    http:Request request;
-    http:Response response;
+    http:Request request?;
+    http:Response response?;
     map<string> uriParams = {};
 |};
 
@@ -15,6 +15,9 @@ public type Context record {|
 public listener http:Listener listener_config = new (8083);
 
 service /mule4 on listener_config {
+    function init() returns error? {
+    }
+
     resource function get error_handler(http:Request request) returns http:Response|error {
         Context ctx = {attributes: {request, response: new}};
         do {
@@ -27,8 +30,8 @@ service /mule4 on listener_config {
             my_error_handler(ctx, err);
         }
 
-        ctx.attributes.response.setPayload(ctx.payload);
-        return ctx.attributes.response;
+        (<http:Response>ctx.attributes.response).setPayload(ctx.payload);
+        return <http:Response>ctx.attributes.response;
     }
 }
 
@@ -42,5 +45,6 @@ public function my_error_handler(Context ctx, error err) {
     // set payload
     string payload1 = "Custom error message: Something went wrong.";
     ctx.payload = payload1;
-    ctx.attributes.response.statusCode = 500;
+    http:Response response = <http:Response>ctx.attributes.response;
+    response.statusCode = 500;
 }

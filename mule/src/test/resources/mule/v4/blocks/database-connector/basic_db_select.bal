@@ -4,8 +4,8 @@ import ballerinax/mysql;
 import ballerinax/mysql.driver as _;
 
 public type Attributes record {|
-    http:Request request;
-    http:Response response;
+    http:Request request?;
+    http:Response response?;
     map<string> uriParams = {};
 |};
 
@@ -21,6 +21,9 @@ mysql:Client mySql_Config = check new ("localhost", "root", "admin123", "test_db
 public listener http:Listener config = new (8081);
 
 service /mule4 on config {
+    function init() returns error? {
+    }
+
     resource function get db(http:Request request) returns http:Response|error {
         Context ctx = {attributes: {request, response: new}};
 
@@ -31,7 +34,7 @@ service /mule4 on config {
             select _iterator_;
         ctx.payload = dbSelect0;
 
-        ctx.attributes.response.setPayload(ctx.payload);
-        return ctx.attributes.response;
+        (<http:Response>ctx.attributes.response).setPayload(ctx.payload);
+        return <http:Response>ctx.attributes.response;
     }
 }

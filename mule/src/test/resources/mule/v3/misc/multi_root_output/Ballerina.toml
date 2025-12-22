@@ -1,0 +1,2 @@
+[workspace]
+packages = ["demo_project_bi", "demo_project_classic"]

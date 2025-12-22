@@ -45,6 +45,14 @@ import javax.xml.parsers.ParserConfigurationException;
 
 import static common.BallerinaModel.Import;
 import static mule.v4.ConversionUtils.getAllowedMethods;
+import static mule.v4.model.MuleModel.AnypointMqConfig;
+import static mule.v4.model.MuleModel.AnypointMqSubscriber;
+import static mule.v4.model.MuleModel.AnypointMqAck;
+import static mule.v4.model.MuleModel.AnypointMqPublish;
+import static mule.v4.model.MuleModel.PubSubConfig;
+import static mule.v4.model.MuleModel.PubSubMessageListener;
+import static mule.v4.model.MuleModel.ApiKitConfig;
+import static mule.v4.model.MuleModel.ApiKitRouter;
 import static mule.v4.model.MuleModel.Async;
 import static mule.v4.model.MuleModel.Choice;
 import static mule.v4.model.MuleModel.Database;
@@ -54,6 +62,9 @@ import static mule.v4.model.MuleModel.DbGenericConnection;
 import static mule.v4.model.MuleModel.Enricher;
 import static mule.v4.model.MuleModel.ErrorHandler;
 import static mule.v4.model.MuleModel.ErrorHandlerRecord;
+import static mule.v4.model.MuleModel.FileConfig;
+import static mule.v4.model.MuleModel.FileListener;
+import static mule.v4.model.MuleModel.FileMatcher;
 import static mule.v4.model.MuleModel.FirstSuccessful;
 import static mule.v4.model.MuleModel.Foreach;
 import static mule.v4.model.MuleModel.GlobalProperty;
@@ -79,6 +90,7 @@ import static mule.v4.model.MuleModel.RaiseError;
 import static mule.v4.model.MuleModel.RemoveVariable;
 import static mule.v4.model.MuleModel.Route;
 import static mule.v4.model.MuleModel.ScatterGather;
+import static mule.v4.model.MuleModel.SchedulingStrategy;
 import static mule.v4.model.MuleModel.SetPayloadElement;
 import static mule.v4.model.MuleModel.SetVariable;
 import static mule.v4.model.MuleModel.SetVariableElement;
@@ -147,7 +159,10 @@ public class MuleConfigReader {
 
     public static void readGlobalConfigElement(Context ctx, MuleElement muleElement) {
         String elementTagName = muleElement.getElement().getTagName();
-        if (MuleXMLTag.HTTP_LISTENER_CONFIG.tag().equals(elementTagName)) {
+        if (MuleXMLTag.APIKIT_CONFIG.tag().equals(elementTagName)) {
+            ApiKitConfig apiKitConfig = readApiKitConfig(ctx, muleElement);
+            ctx.currentFileCtx.configs.apiKitConfigs.put(apiKitConfig.name(), apiKitConfig);
+        } else if (MuleXMLTag.HTTP_LISTENER_CONFIG.tag().equals(elementTagName)) {
             HTTPListenerConfig httpListenerConfig = readHttpListenerConfig(ctx, muleElement);
             ctx.currentFileCtx.configs.httpListenerConfigs.put(httpListenerConfig.name(), httpListenerConfig);
         } else if (MuleXMLTag.HTTP_REQUEST_CONFIG.tag().equals(elementTagName)) {
@@ -164,6 +179,15 @@ public class MuleConfigReader {
         } else if (MuleXMLTag.VM_CONFIG.tag().equals(elementTagName)) {
             VMConfig vmConfig = readVmConfig(ctx, muleElement);
             // TODO: Revisit how we can use this
+        } else if (MuleXMLTag.ANYPOINT_MQ_CONFIG.tag().equals(elementTagName)) {
+            AnypointMqConfig anypointMqConfig = readAnypointMqConfig(ctx, muleElement);
+            ctx.currentFileCtx.configs.anypointMqConfigs.put(anypointMqConfig.name(), anypointMqConfig);
+        } else if (MuleXMLTag.PUBSUB_CONFIG.tag().equals(elementTagName)) {
+            PubSubConfig pubSubConfig = readPubSubConfig(ctx, muleElement);
+            ctx.currentFileCtx.configs.pubSubConfigs.put(pubSubConfig.name(), pubSubConfig);
+        } else if (MuleXMLTag.FILE_CONFIG.tag().equals(elementTagName)) {
+            FileConfig fileConfig = readFileConfig(ctx, muleElement);
+            ctx.currentFileCtx.configs.fileConfigs.put(fileConfig.name(), fileConfig);
         } else if (MuleXMLTag.CONFIGURATION_PROPERTIES.tag().equals(elementTagName)) {
             // Ignore as we automatically add all .yaml and .properties to config.toml
         } else if (MuleXMLTag.GLOBAL_PROPERTY.tag().equals(elementTagName)) {
@@ -190,6 +214,15 @@ public class MuleConfigReader {
             }
             case MuleXMLTag.SCHEDULER -> {
                 return readScheduler(ctx, muleElement);
+            }
+            case MuleXMLTag.ANYPOINT_MQ_SUBSCRIBER -> {
+                return readAnypointMqSubscriber(ctx, muleElement);
+            }
+            case MuleXMLTag.PUBSUB_MESSAGE_LISTENER -> {
+                return readPubSubMessageListener(ctx, muleElement);
+            }
+            case MuleXMLTag.FILE_LISTENER -> {
+                return readFileListener(ctx, muleElement);
             }
 
             // Process Items
@@ -268,6 +301,15 @@ public class MuleConfigReader {
             case MuleXMLTag.VM_CONSUME -> {
                 return readVMConsume(ctx, muleElement);
             }
+            case MuleXMLTag.APIKIT_ROUTER -> {
+                return readApiKitRouter(ctx, muleElement);
+            }
+            case MuleXMLTag.ANYPOINT_MQ_ACK -> {
+                return readAnypointMqAck(ctx, muleElement);
+            }
+            case MuleXMLTag.ANYPOINT_MQ_PUBLISH -> {
+                return readAnypointMqPublish(ctx, muleElement);
+            }
             default -> {
                 return readUnsupportedBlock(ctx, muleElement);
             }
@@ -324,6 +366,87 @@ public class MuleConfigReader {
         return new Scheduler(frequency, timeUnit, startDelay);
     }
 
+    private static AnypointMqSubscriber readAnypointMqSubscriber(Context ctx, MuleElement muleElement) {
+        Element element = muleElement.getElement();
+        String configRef = element.getAttribute("config-ref");
+        String destination = element.getAttribute("destination");
+        return new AnypointMqSubscriber(configRef, destination);
+    }
+
+    private static AnypointMqAck readAnypointMqAck(Context ctx, MuleElement muleElement) {
+        Element element = muleElement.getElement();
+        String configRef = element.getAttribute("config-ref");
+        // Consume any child elements (ignoring them)
+        while (muleElement.peekChild() != null) {
+            muleElement.consumeChild();
+        }
+        return new AnypointMqAck(configRef);
+    }
+
+    private static AnypointMqPublish readAnypointMqPublish(Context ctx, MuleElement muleElement) {
+        Element element = muleElement.getElement();
+        String configRef = element.getAttribute("config-ref");
+        String destination = element.getAttribute("destination");
+        String messageId = element.getAttribute("messageId");
+
+        Optional<String> properties = Optional.empty();
+        // Parse nested anypoint-mq:properties element
+        while (muleElement.peekChild() != null) {
+            MuleElement child = muleElement.consumeChild();
+            Element childElement = child.getElement();
+            if (childElement.getTagName().equals("anypoint-mq:properties")) {
+                String script = childElement.getTextContent();
+                if (script != null && !script.trim().isEmpty()) {
+                    properties = Optional.of(script.trim());
+                }
+            }
+        }
+
+        return new AnypointMqPublish(configRef, destination, messageId, properties);
+    }
+
+    private static PubSubMessageListener readPubSubMessageListener(Context ctx, MuleElement muleElement) {
+        Element element = muleElement.getElement();
+        String configRef = element.getAttribute("config-ref");
+        String projectId = element.getAttribute("projectId");
+        String subscriptionName = element.getAttribute("subscriptionName");
+        return new PubSubMessageListener(configRef, projectId, subscriptionName);
+    }
+
+    private static FileListener readFileListener(Context ctx, MuleElement muleElement) {
+        Element element = muleElement.getElement();
+        String configRef = element.getAttribute("config-ref");
+        String directory = element.getAttribute("directory");
+        String autoDelete = element.getAttribute("autoDelete");
+        String outputMimeType = element.getAttribute("outputMimeType");
+
+        SchedulingStrategy schedulingStrategy = null;
+        FileMatcher matcher = null;
+
+        while (muleElement.peekChild() != null) {
+            MuleElement child = muleElement.consumeChild();
+            Element childElement = child.getElement();
+            if (childElement.getTagName().equals(MuleXMLTag.SCHEDULING_STRATEGY.tag())) {
+                // Parse scheduling-strategy
+                while (child.peekChild() != null) {
+                    MuleElement strategyChild = child.consumeChild();
+                    Element strategyElement = strategyChild.getElement();
+                    if (strategyElement.getTagName().equals(MuleXMLTag.FIXED_FREQUENCY.tag())) {
+                        String frequency = strategyElement.getAttribute("frequency");
+                        String timeUnit = strategyElement.getAttribute("timeUnit");
+                        schedulingStrategy = new SchedulingStrategy(frequency, timeUnit);
+                    }
+                }
+            } else if (childElement.getTagName().equals(MuleXMLTag.FILE_MATCHER.tag())) {
+                String filenamePattern = childElement.getAttribute("filenamePattern");
+                String regularFiles = childElement.getAttribute("regularFiles");
+                matcher = new FileMatcher(filenamePattern, regularFiles);
+            }
+        }
+
+        return new FileListener(configRef, directory, autoDelete, outputMimeType, schedulingStrategy, matcher);
+    }
+
     private static MuleRecord readExpressionComponent(Context ctx, MuleElement muleElement) {
         return new ExpressionComponent(muleElement.getElement().getTextContent());
     }
@@ -360,6 +483,17 @@ public class MuleConfigReader {
         return new Choice(whens, otherwiseProcess);
     }
 
+    // ApiKit Flow Helpers
+    private static boolean isApiKitFlowPattern(String flowName) {
+        return flowName.matches("^(get|post|put|delete|patch|head|options|GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)" +
+                ":.*:.*$");
+    }
+
+    private static Optional<MuleRecord> createApiKitSource(Context ctx, String flowName) {
+        ApiKitConfig.HTTPResourceData resourceData = ApiKitConfig.parseApiKitFlowName(flowName);
+        return Optional.ofNullable(ctx.projectCtx.getApiKitConfig(resourceData.configName()));
+    }
+
     // Scopes
     public static Flow readFlow(Context ctx, MuleElement mFlowElement) {
         Element flowElement = mFlowElement.getElement();
@@ -380,19 +514,33 @@ public class MuleConfigReader {
             } else if (element.getTagName().equals(MuleXMLTag.SCHEDULER.tag())) {
                 assert source == null;
                 source = readBlock(ctx, child);
+            } else if (element.getTagName().equals(MuleXMLTag.ANYPOINT_MQ_SUBSCRIBER.tag())) {
+                assert source == null;
+                source = readBlock(ctx, child);
+            } else if (element.getTagName().equals(MuleXMLTag.PUBSUB_MESSAGE_LISTENER.tag())) {
+                assert source == null;
+                source = readBlock(ctx, child);
+            } else if (element.getTagName().equals(MuleXMLTag.FILE_LISTENER.tag())) {
+                assert source == null;
+                source = readBlock(ctx, child);
             } else {
                 MuleRecord muleRec = readBlock(ctx, child);
                 flowBlocks.add(muleRec);
             }
         }
 
-        Optional<MuleRecord> optSource;
-        if (source == null) {
-            optSource = Optional.empty();
+        MuleRecord finalSource = source;
+        Supplier<Optional<MuleRecord>> sourceSupplier;
+
+        if (finalSource != null) {
+            sourceSupplier = () -> Optional.of(finalSource);
+        } else if (isApiKitFlowPattern(flowName)) {
+            sourceSupplier = () -> createApiKitSource(ctx, flowName);
         } else {
-            optSource = Optional.of(source);
+            sourceSupplier = Optional::empty;
         }
-        return new Flow(flowName, optSource, flowBlocks);
+
+        return new Flow(flowName, sourceSupplier, flowBlocks);
     }
 
     public static SubFlow readSubFlow(Context ctx, MuleElement mFlowElement) {
@@ -645,6 +793,7 @@ public class MuleConfigReader {
         Optional<String> headersScript = Optional.empty();
         Optional<String> uriParamsScript = Optional.empty();
         Optional<String> queryParamsScript = Optional.empty();
+        List<UnsupportedBlock> unsupportedBlocks = new ArrayList<>();
 
         // Check for inline DataWeave script (CDATA) in http:request element
         String textContent = element.getTextContent();
@@ -673,13 +822,13 @@ public class MuleConfigReader {
                     queryParamsScript = Optional.of(script.trim());
                 }
             } else {
-                // TODO: handle all other scenarios
-                ctx.logger.logSevere("Ignoring unsupported element: " + tagName);
+                UnsupportedBlock unsupportedBlock = readUnsupportedBlock(ctx, child);
+                unsupportedBlocks.add(unsupportedBlock);
             }
         }
 
         return new HttpRequest(configRef, method, urlSupplier, path, queryParams, headersScript, uriParamsScript,
-                queryParamsScript);
+                queryParamsScript, unsupportedBlocks);
     }
 
     private static void processQueryParams(Map<String, String> queryParams, MuleElement muleElement) {
@@ -769,6 +918,19 @@ public class MuleConfigReader {
     }
 
     // Global Elements
+    private static ApiKitConfig readApiKitConfig(Context ctx, MuleElement muleElement) {
+        Element element = muleElement.getElement();
+        String name = element.getAttribute("name");
+        String api = element.getAttribute("api");
+        return new ApiKitConfig(name, api);
+    }
+
+    private static ApiKitRouter readApiKitRouter(Context ctx, MuleElement muleElement) {
+        Element element = muleElement.getElement();
+        String configRef = element.getAttribute("config-ref");
+        return new ApiKitRouter(configRef);
+    }
+
     private static HTTPListenerConfig readHttpListenerConfig(Context ctx, MuleElement muleElement) {
         Element element = muleElement.getElement();
         ctx.addImport(new Import(Constants.ORG_BALLERINA, Constants.MODULE_HTTP));
@@ -843,6 +1005,42 @@ public class MuleConfigReader {
         return queues;
     }
 
+    private static AnypointMqConfig readAnypointMqConfig(Context ctx, MuleElement muleElement) {
+        Element element = muleElement.getElement();
+        String name = element.getAttribute("name");
+        // Consume child elements (like anypoint-mq:connection) without processing them
+        while (muleElement.peekChild() != null) {
+            muleElement.consumeChild();
+        }
+        return new AnypointMqConfig(name);
+    }
+
+    private static PubSubConfig readPubSubConfig(Context ctx, MuleElement muleElement) {
+        Element element = muleElement.getElement();
+        String name = element.getAttribute("name");
+        // Consume child elements (like pubsub:connection, pubsub:private-key) without processing them
+        while (muleElement.peekChild() != null) {
+            muleElement.consumeChild();
+        }
+        return new PubSubConfig(name);
+    }
+
+    private static FileConfig readFileConfig(Context ctx, MuleElement muleElement) {
+        Element element = muleElement.getElement();
+        String name = element.getAttribute("name");
+        String workingDir = "<WORKING_DIR>";
+
+        while (muleElement.peekChild() != null) {
+            MuleElement child = muleElement.consumeChild();
+            Element childElement = child.getElement();
+            if (childElement.getTagName().equals(MuleXMLTag.FILE_CONNECTION.tag())) {
+                workingDir = childElement.getAttribute("workingDir");
+            }
+        }
+
+        return new FileConfig(name, workingDir);
+    }
+
     private static GlobalProperty readGlobalProperty(Context ctx, MuleElement muleElement) {
         Element element = muleElement.getElement();
         String name = element.getAttribute("name");
@@ -909,6 +1107,9 @@ public class MuleConfigReader {
     }
 
     private static TransformMessage readTransformMessage(Context ctx, MuleElement muleElement) {
+        String docName = muleElement.getElement().getAttribute("doc:name");
+        Optional<String> name = (docName == null || docName.isEmpty()) ? Optional.empty() : Optional.of(docName);
+
         List<TransformMessageElement> transformMessageElements = new ArrayList<>();
         while (muleElement.peekChild() != null) {
             MuleElement child = muleElement.consumeChild();
@@ -927,7 +1128,7 @@ public class MuleConfigReader {
                 default -> throw new UnsupportedOperationException("Unsupported ee:transform child: " + muleXMLTag);
             }
         }
-        return new TransformMessage(transformMessageElements);
+        return new TransformMessage(name, transformMessageElements);
     }
 
     private static void processTransformMessageChildren(MuleElement parent, List<TransformMessageElement> elements) {

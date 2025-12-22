@@ -13,8 +13,8 @@ public type Vars record {|
 |};
 
 public type Attributes record {|
-    http:Request request;
-    http:Response response;
+    http:Request request?;
+    http:Response response?;
     map<string> uriParams = {};
 |};
 
@@ -27,6 +27,9 @@ public type Context record {|
 public listener http:Listener config = new (8081);
 
 service /mule4 on config {
+    function init() returns error? {
+    }
+
     resource function get attribute_test/[string country]/v1(http:Request request) returns http:Response|error {
         Context ctx = {attributes: {request, response: new, uriParams: {country}}};
         ctx.vars.queryParams = ctx.attributes.request.getQueryParams();
@@ -39,7 +42,7 @@ service /mule4 on config {
         ctx.vars.unsupportedAttributeAccess = ctx.attributes["unsupportedAttribute"].city;
         ctx.vars.httpMethod = ctx.attributes.request.method;
 
-        ctx.attributes.response.setPayload(ctx.payload);
-        return ctx.attributes.response;
+        (<http:Response>ctx.attributes.response).setPayload(ctx.payload);
+        return <http:Response>ctx.attributes.response;
     }
 }

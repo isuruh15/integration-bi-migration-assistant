@@ -4,8 +4,8 @@ import ballerinax/oracledb;
 import ballerinax/oracledb.driver as _;
 
 public type Attributes record {|
-    http:Request request;
-    http:Response response;
+    http:Request request?;
+    http:Response response?;
     map<string> uriParams = {};
 |};
 
@@ -22,6 +22,9 @@ oracledb:Client oracle_config2 = check new ("localhost", "admin", "nimda", "serv
 public listener http:Listener config = new (8081);
 
 service /mule4 on config {
+    function init() returns error? {
+    }
+
     resource function get db(http:Request request) returns http:Response|error {
         Context ctx = {attributes: {request, response: new}};
 
@@ -39,7 +42,7 @@ service /mule4 on config {
             select _iterator_;
         ctx.payload = dbSelect1;
 
-        ctx.attributes.response.setPayload(ctx.payload);
-        return ctx.attributes.response;
+        (<http:Response>ctx.attributes.response).setPayload(ctx.payload);
+        return <http:Response>ctx.attributes.response;
     }
 }

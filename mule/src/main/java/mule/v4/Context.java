@@ -26,7 +26,11 @@ import mule.common.MuleXMLNavigator;
 import mule.common.MultiRootContext;
 import mule.v4.dataweave.converter.DWConstruct;
 import mule.v4.model.MuleModel;
+import mule.v4.model.MuleModel.AnypointMqConfig;
+import mule.v4.model.MuleModel.ApiKitConfig;
 import mule.v4.model.MuleModel.DbConfig;
+import mule.v4.model.MuleModel.HttpListener;
+import mule.v4.model.MuleModel.PubSubConfig;
 import mule.v4.model.ParseResult;
 import org.jetbrains.annotations.NotNull;
 
@@ -41,15 +45,17 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
-import static common.BallerinaModel.Function;
 import static common.BallerinaModel.Import;
 import static common.BallerinaModel.ModuleTypeDef;
 import static common.BallerinaModel.ModuleVar;
 import static mule.v4.MuleToBalConverter.generateTextDocument;
 import static mule.v4.model.MuleModel.ErrorHandler;
+import static mule.v4.model.MuleModel.FileConfig;
 import static mule.v4.model.MuleModel.GlobalProperty;
 import static mule.v4.model.MuleModel.HTTPListenerConfig;
 import static mule.v4.model.MuleModel.HTTPRequestConfig;
@@ -67,6 +73,16 @@ public class Context extends ContextBase {
     public final MigrationMetrics<DWConstruct> migrationMetrics = new MigrationMetrics<>();
     private final Map<File, ParseResult> parseResults = new HashMap<>();
     private final Map<File, FileContext> fileContexts = new HashMap<>();
+    public String currentServiceBasePath;
+    public String currentResourcePath;
+    public String currentListenerPort;
+    public String currentApiKitBasePath;
+    public BallerinaModel.Expression.VariableReference jmsCaller;
+    public List<BallerinaModel.ObjectField> serviceFields = new ArrayList<>();
+    public List<BallerinaModel.Statement> initFunctionBody = new ArrayList<>();
+    public Map<JMSMessageProducerLookupKey, BallerinaModel.Expression.VariableReference> messageProducers =
+            new HashMap<>();
+    public boolean inServiceGen = false;
 
     public Context(List<File> xmlFiles, List<File> yamlFiles, Path muleAppDir, MuleVersion muleVersion,
                    List<File> propertyFiles, String sourceName, boolean dryRun, boolean keepStructure,
@@ -91,6 +107,11 @@ public class Context extends ContextBase {
         return isStandaloneBalFile;
     }
 
+    public HTTPListenerConfig getDefaultHttpListenerConfig() {
+        return projectCtx.httpListenerConfigMaps.stream().flatMap(each -> each.values().stream()).findFirst()
+                .orElse(null);
+    }
+
     @Override
     public void parseAllFiles() {
         for (File xmlFile : xmlFiles) {
@@ -108,21 +129,39 @@ public class Context extends ContextBase {
 
     @Override
     public List<BallerinaModel.TextDocument> codeGen() {
-        List<BallerinaModel.TextDocument> result = new ArrayList<>();
-        for (File xmlFile : parseResults.keySet()) {
-            currentFileCtx = this.fileContexts.get(xmlFile);
-            ParseResult parseResult = parseResults.get(xmlFile);
-            assert currentFileCtx != null : "We should have created file ctx when we parse the file";
-            String balFileName = muleAppDir != null ?
-                    muleAppDir.relativize(xmlFile.toPath()).toString().replace(File.separator, ".")
-                            .replace(".xml", "") : "internal.bal";
-            try {
-                result.add(generateTextDocument(this, balFileName, parseResult.flows(), parseResult.subFlows()));
-            } catch (Exception e) {
-                logger.logSevere("Unrecoverable error while generating code for %s".formatted(xmlFile));
-            }
-        }
-        return result;
+        return parseResults.keySet().stream().filter(f -> {
+                    var parserResult = parseResults.get(f);
+                    return parserResult != null && parserResult.flows() != null && parserResult.subFlows() != null;
+                })
+                .sorted((f1, f2) -> {
+                    boolean f1HasHttp = hasHttpListener(parseResults.get(f1));
+                    boolean f2HasHttp = hasHttpListener(parseResults.get(f2));
+                    if (f1HasHttp == f2HasHttp) {
+                        return 0;
+                    }
+                    return f1HasHttp ? -1 : 1; // HTTP listeners first
+                }).map(xmlFile -> {
+                    currentFileCtx = this.fileContexts.get(xmlFile);
+                    ParseResult parseResult = parseResults.get(xmlFile);
+                    assert currentFileCtx != null : "We should have created file ctx when we parse the file";
+
+                    String balFileName = muleAppDir != null
+                            ? muleAppDir.relativize(xmlFile.toPath()).toString().replace(File.separator, ".")
+                            .replace(".xml", "")
+                            : "internal.bal";
+                    try {
+                        return generateTextDocument(this, balFileName, parseResult.flows(),
+                                parseResult.subFlows());
+                    } catch (Exception e) {
+                        logger.logSevere("Unrecoverable error while generating code for %s".formatted(xmlFile));
+                        return null;
+                    }
+                }).filter(Objects::nonNull).collect(Collectors.toCollection(ArrayList::new));
+    }
+
+    private boolean hasHttpListener(ParseResult parseResult) {
+        return parseResult.flows().stream()
+                .anyMatch(flow -> flow.source().filter(source -> source instanceof HttpListener).isPresent());
     }
 
     @Override
@@ -153,6 +192,30 @@ public class Context extends ContextBase {
         }
     }
 
+    public String getApiKitBasePath(ApiKitConfig apiKitConfig) {
+        return getApiKitBasePath(apiKitConfig.name());
+    }
+
+    public String getApiKitBasePath(String configName) {
+        String key = configName == null || configName.isBlank() ? "__defaultApiKitConfig__" : configName;
+        return projectCtx.apiKitBasePaths.computeIfAbsent(key,
+                ignored -> "/apikit" + projectCtx.apiKitBasePaths.size());
+    }
+
+    public void resetServiceState() {
+        this.jmsCaller = null;
+        this.initFunctionBody.clear();
+        this.serviceFields.clear();
+        this.inServiceGen = false;
+        this.messageProducers.clear();
+    }
+
+    public Optional<BallerinaModel.Function> getServiceInitFunction() {
+        return Optional.of(new BallerinaModel.Function("init", List.of(), BallerinaModel.TypeDesc.UnionTypeDesc.of(
+                BallerinaModel.TypeDesc.BuiltinType.ERROR, BallerinaModel.TypeDesc.BuiltinType.NIL),
+                new ArrayList<>(initFunctionBody)));
+    }
+
     public static class FileContext {
         public final String filePath;
         public final GlobalConfigs configs;
@@ -174,16 +237,26 @@ public class Context extends ContextBase {
         public final LinkedHashMap<String, String> vars = new LinkedHashMap<>();
         public final LinkedHashMap<String, String> attributes = new LinkedHashMap<>();
         public final HashMap<String, String> vmQueueNameToBalFuncMap = new LinkedHashMap<>();
+        public final Map<String, BallerinaModel.Expression.VariableReference> jmsConnectionConfig = new HashMap<>();
+
+        // Track last HTTP service across all files for API Kit resource merging
+        public BallerinaModel.Service lastHttpService = null;
 
         // Shared mule configs
+        List<HashMap<String, ApiKitConfig>> apiKitConfigMaps = new ArrayList<>();
         List<HashMap<String, HTTPListenerConfig>> httpListenerConfigMaps = new ArrayList<>();
         List<HashMap<String, HTTPRequestConfig>> httpRequestConfigMaps = new ArrayList<>();
         List<HashMap<String, DbConfig>> dbConfigMaps = new ArrayList<>();
+        List<HashMap<String, AnypointMqConfig>> anypointMqConfigMaps = new ArrayList<>();
+        List<HashMap<String, PubSubConfig>> pubSubConfigMaps = new ArrayList<>();
+        List<HashMap<String, FileConfig>> fileConfigMaps = new ArrayList<>();
 
         // Shared bal constructs
         public final HashMap<String, ModuleVar> configurableVars = new LinkedHashMap<>();
         List<HashMap<String, ModuleTypeDef>> typeDefMaps = new ArrayList<>();
-        List<HashMap<String, Function>> functionMaps = new ArrayList<>();
+        List<HashMap<String, BallerinaModel.Function>> functionMaps = new ArrayList<>();
+
+        private final Map<String, String> apiKitBasePaths = new HashMap<>();
 
         public void addJavaDependency(MuleToBalConverter.JavaDependencies dependencies) {
             javaDependencies.add(dependencies);
@@ -193,12 +266,28 @@ public class Context extends ContextBase {
             return Collections.unmodifiableList(javaDependencies);
         }
 
+        public ApiKitConfig getApiKitConfig(String key) {
+            return getValueFromMaps(apiKitConfigMaps, key);
+        }
+
         public HTTPListenerConfig getHttpListenerConfig(String key) {
             return getValueFromMaps(httpListenerConfigMaps, key);
         }
 
         public HTTPRequestConfig getHttpRequestConfig(String key) {
             return getValueFromMaps(httpRequestConfigMaps, key);
+        }
+
+        public AnypointMqConfig getAnypointMqConfig(String key) {
+            return getValueFromMaps(anypointMqConfigMaps, key);
+        }
+
+        public PubSubConfig getPubSubConfig(String key) {
+            return getValueFromMaps(pubSubConfigMaps, key);
+        }
+
+        public FileConfig getFileConfig(String key) {
+            return getValueFromMaps(fileConfigMaps, key);
         }
 
         public boolean configurableVarExists(String key) {
@@ -229,18 +318,27 @@ public class Context extends ContextBase {
     }
 
     public static class GlobalConfigs {
+
+        public final HashMap<String, ApiKitConfig> apiKitConfigs = new LinkedHashMap<>();
         public final HashMap<String, HTTPListenerConfig> httpListenerConfigs = new LinkedHashMap<>();
         public final HashMap<String, HTTPRequestConfig> httpRequestConfigs = new LinkedHashMap<>();
         public final HashMap<String, DbConfig> dbConfigs = new LinkedHashMap<>();
+        public final HashMap<String, AnypointMqConfig> anypointMqConfigs = new LinkedHashMap<>();
+        public final HashMap<String, PubSubConfig> pubSubConfigs = new LinkedHashMap<>();
+        public final HashMap<String, FileConfig> fileConfigs = new LinkedHashMap<>();
         public final List<ErrorHandler> globalErrorHandlers = new ArrayList<>();
         public final List<GlobalProperty> globalProperties = new ArrayList<>();
         public final List<MuleImport> imports = new ArrayList<>();
         public final List<UnsupportedBlock> unsupportedBlocks = new ArrayList<>();
 
         GlobalConfigs(ProjectContext projCtx) {
+            projCtx.apiKitConfigMaps.add(apiKitConfigs);
             projCtx.httpListenerConfigMaps.add(httpListenerConfigs);
             projCtx.httpRequestConfigMaps.add(httpRequestConfigs);
             projCtx.dbConfigMaps.add(dbConfigs);
+            projCtx.anypointMqConfigMaps.add(anypointMqConfigs);
+            projCtx.pubSubConfigMaps.add(pubSubConfigs);
+            projCtx.fileConfigMaps.add(fileConfigs);
         }
     }
 
@@ -248,9 +346,9 @@ public class Context extends ContextBase {
         public final HashSet<Import> imports = new LinkedHashSet<>();
         public final HashMap<String, ModuleTypeDef> typeDefs = new LinkedHashMap<>();
         public final HashMap<String, ModuleVar> moduleVars = new LinkedHashMap<>();
-        public final HashMap<String, Function> commonFunctions = new LinkedHashMap<>();
+        public final HashMap<String, BallerinaModel.Function> commonFunctions = new LinkedHashMap<>();
         // TODO: merge `commonFunctions` and `functions`
-        public final List<Function> functions = new ArrayList<>();
+        public final List<BallerinaModel.Function> functions = new ArrayList<>();
         public final List<String> utilFunctions = new ArrayList<>();
 
         BalConstructs(ProjectContext projCtx) {
@@ -299,7 +397,7 @@ public class Context extends ContextBase {
     }
 
     @Override
-    public void addFunction(Function function) {
+    public void addFunction(BallerinaModel.Function function) {
         this.currentFileCtx.balConstructs.functions.add(function);
     }
 
@@ -338,5 +436,14 @@ public class Context extends ContextBase {
         public int firstSuccessfulCount = 0;
         public int firstSuccessfulFuncCount = 0;
         public int requestPathBuilderCount = 0;
+        public int jmsConnectionCount = 0;
+        public int jmsSessionCount = 0;
+        public int jmsProducerCount = 0;
+        public int jmsMessageCount = 0;
+        public Map<String, Integer> dwFunctionPrefixCounters = new HashMap<>();
+    }
+
+    public record JMSMessageProducerLookupKey(String connectionConfig, String destination) {
+
     }
 }

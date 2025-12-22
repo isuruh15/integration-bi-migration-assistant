@@ -17,11 +17,14 @@
  */
 package mule.v4.model;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.function.Supplier;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public record MuleModel() {
 
@@ -68,15 +71,61 @@ public record MuleModel() {
         }
     }
 
+    public record AnypointMqSubscriber(Kind kind, String configRef, String destination) implements MuleRecord {
+        public AnypointMqSubscriber(String configRef, String destination) {
+            this(Kind.ANYPOINT_MQ_SUBSCRIBER, configRef, destination);
+        }
+    }
+
+    public record AnypointMqAck(Kind kind, String configRef) implements MuleRecord {
+        public AnypointMqAck(String configRef) {
+            this(Kind.ANYPOINT_MQ_ACK, configRef);
+        }
+    }
+
+    public record AnypointMqPublish(Kind kind, String configRef, String destination, String messageId,
+                                    Optional<String> properties) implements MuleRecord {
+        public AnypointMqPublish(String configRef, String destination, String messageId,
+                                Optional<String> properties) {
+            this(Kind.ANYPOINT_MQ_PUBLISH, configRef, destination, messageId, properties);
+        }
+    }
+
+    public record PubSubMessageListener(Kind kind, String configRef, String projectId,
+                                        String subscriptionName) implements MuleRecord {
+        public PubSubMessageListener(String configRef, String projectId, String subscriptionName) {
+            this(Kind.PUBSUB_MESSAGE_LISTENER, configRef, projectId, subscriptionName);
+        }
+    }
+
+    public record SchedulingStrategy(String frequency, String timeUnit) {
+    }
+
+    public record FileMatcher(String filenamePattern, String regularFiles) {
+    }
+
+    public record FileListener(Kind kind, String configRef, String directory, String autoDelete,
+                               String outputMimeType, SchedulingStrategy schedulingStrategy,
+                               FileMatcher matcher) implements MuleRecord {
+        public FileListener(String configRef, String directory, String autoDelete,
+                           String outputMimeType, SchedulingStrategy schedulingStrategy,
+                           FileMatcher matcher) {
+            this(Kind.FILE_LISTENER, configRef, directory, autoDelete, outputMimeType,
+                    schedulingStrategy, matcher);
+        }
+    }
+
     public record ExpressionComponent(Kind kind, String exprCompContent) implements MuleRecord {
         public ExpressionComponent(String exprCompContent) {
             this(Kind.EXPRESSION_COMPONENT, exprCompContent);
         }
     }
 
-    public record TransformMessage(Kind kind, List<TransformMessageElement> children) implements MuleRecord {
-        public TransformMessage(List<TransformMessageElement> children) {
-            this(Kind.TRANSFORM_MESSAGE, children);
+    public record TransformMessage(Kind kind, Optional<String> name,
+                                   List<TransformMessageElement> children) implements MuleRecord {
+
+        public TransformMessage(Optional<String> name, List<TransformMessageElement> children) {
+            this(Kind.TRANSFORM_MESSAGE, name, children);
         }
     }
 
@@ -112,13 +161,15 @@ public record MuleModel() {
 
     public record HttpRequest(Kind kind, String configRef, String method, Supplier<String> url, String path,
                               Map<String, String> queryParams, Optional<String> headersScript,
-                              Optional<String> uriParamsScript, Optional<String> queryParamsScript)
+                              Optional<String> uriParamsScript, Optional<String> queryParamsScript,
+                              List<UnsupportedBlock> unsupportedBlocks)
             implements MuleRecord {
         public HttpRequest(String configRef, String method, Supplier<String> url, String path,
                           Map<String, String> queryParams, Optional<String> headersScript,
-                          Optional<String> uriParamsScript, Optional<String> queryParamsScript) {
+                          Optional<String> uriParamsScript, Optional<String> queryParamsScript,
+                          List<UnsupportedBlock> unsupportedBlocks) {
             this(Kind.HTTP_REQUEST, configRef, method, url, path, queryParams, headersScript, uriParamsScript,
-                    queryParamsScript);
+                    queryParamsScript, unsupportedBlocks);
         }
     }
 
@@ -154,10 +205,15 @@ public record MuleModel() {
     }
 
     // Scopes
-    public record Flow(Kind kind, String name, Optional<MuleRecord> source, List<MuleRecord> flowBlocks)
+    public record Flow(Kind kind, String name, Supplier<Optional<MuleRecord>> sourceSupplier,
+            List<MuleRecord> flowBlocks)
             implements MuleRecord {
-        public Flow(String name, Optional<MuleRecord> source, List<MuleRecord> flowBlocks) {
-            this(Kind.FLOW, name, source, flowBlocks);
+        public Flow(String name, Supplier<Optional<MuleRecord>> sourceSupplier, List<MuleRecord> flowBlocks) {
+            this(Kind.FLOW, name, sourceSupplier, flowBlocks);
+        }
+
+        public Optional<MuleRecord> source() {
+            return sourceSupplier.get();
         }
     }
 
@@ -262,6 +318,75 @@ public record MuleModel() {
     public record MuleImport(String file) {
     }
 
+    public record ApiKitConfig(Kind kind, String name, String api) implements MuleRecord {
+
+        public ApiKitConfig(String name, String api) {
+            this(Kind.APIKIT_CONFIG, name, api);
+        }
+
+        public HTTPResourceData resourcePathData(Flow flow) {
+            return parseApiKitFlowName(flow.name());
+        }
+
+        /**
+         * Parses an ApiKit flow name to extract HTTP resource data.
+         * Supports two patterns:
+         * - {METHOD}:\{PATH}:{CONFIG_NAME} (3 parts)
+         * - {METHOD}:\{PATH}:{PAYLOAD_FORMAT}:{CONFIG_NAME} (4 parts, payload format is
+         * ignored)
+         *
+         * @param flowName the flow name to parse
+         * @return HTTPResourceData containing resource path, path parameters, HTTP
+         *         method, and config name
+         */
+        public static HTTPResourceData parseApiKitFlowName(String flowName) {
+            // Pattern: {METHOD}:\{PATH}:{CONFIG_NAME} or
+            // {METHOD}:\{PATH}:{PAYLOAD_FORMAT}:{CONFIG_NAME}
+            String[] parts = flowName.split(":");
+            if (parts.length < 3) {
+                return new HTTPResourceData("", List.of(), "get", "");
+            }
+
+            String method = parts[0].toLowerCase();
+            String configName = parts[parts.length - 1];
+            // For 4-part pattern, path is parts[1] (skip parts[2] which is payload format)
+            // For 3-part pattern, path is parts[1]
+            String path = parts[1];
+
+            // Remove leading \ if present
+            if (path.startsWith("\\")) {
+                path = path.substring(1);
+            }
+
+            // Extract path parameters from escaped format: \(id) before transformation
+            List<String> pathParams = new ArrayList<>();
+            Pattern pattern = Pattern.compile("\\\\\\(([^)]+)\\)");
+            Matcher matcher = pattern.matcher(path);
+            while (matcher.find()) {
+                pathParams.add(matcher.group(1));
+            }
+
+            // Convert escaped path: orders\(id) -> orders/[string id]
+            String resourcePath = path
+                    .replace("\\(", "/[string ")
+                    .replace(")", "]")
+                    .replace("\\", "/");
+
+            return new HTTPResourceData(resourcePath, pathParams, method, configName);
+        }
+
+        public record HTTPResourceData(String resourcePath, List<String> pathParams, String method,
+                String configName) {
+
+        }
+    }
+
+    public record ApiKitRouter(Kind kind, String configRef) implements MuleRecord {
+        public ApiKitRouter(String configRef) {
+            this(Kind.APIKIT_ROUTER, configRef);
+        }
+    }
+
     public record HTTPListenerConfig(Kind kind, String name, String basePath, String port,
                                      String host) implements MuleRecord {
         public HTTPListenerConfig(String name, String basePath, String port, String host) {
@@ -285,6 +410,24 @@ public record MuleModel() {
     public record VMConfig(Kind kind, String name, List<VMQueue> queues) implements MuleRecord {
         public VMConfig(String name, List<VMQueue> queues) {
             this(Kind.VM_CONFIG, name, queues);
+        }
+    }
+
+    public record AnypointMqConfig(Kind kind, String name) implements MuleRecord {
+        public AnypointMqConfig(String name) {
+            this(Kind.ANYPOINT_MQ_CONFIG, name);
+        }
+    }
+
+    public record PubSubConfig(Kind kind, String name) implements MuleRecord {
+        public PubSubConfig(String name) {
+            this(Kind.PUBSUB_CONFIG, name);
+        }
+    }
+
+    public record FileConfig(Kind kind, String name, String workingDir) implements MuleRecord {
+        public FileConfig(String name, String workingDir) {
+            this(Kind.FILE_CONFIG, name, workingDir);
         }
     }
 
@@ -347,6 +490,14 @@ public record MuleModel() {
         VM_CONSUME,
         LOGGER,
         SCHEDULER,
+        ANYPOINT_MQ_CONFIG,
+        ANYPOINT_MQ_SUBSCRIBER,
+        ANYPOINT_MQ_ACK,
+        ANYPOINT_MQ_PUBLISH,
+        PUBSUB_CONFIG,
+        PUBSUB_MESSAGE_LISTENER,
+        FILE_CONFIG,
+        FILE_LISTENER,
         EXPRESSION_COMPONENT,
         PAYLOAD,
         FLOW_REFERENCE,
@@ -356,6 +507,8 @@ public record MuleModel() {
         SCATTER_GATHER,
         FIRST_SUCCESSFUL,
         ROUTE,
+        APIKIT_CONFIG,
+        APIKIT_ROUTER,
         HTTP_LISTENER_CONFIG,
         HTTP_REQUEST_CONFIG,
         DB_CONFIG,

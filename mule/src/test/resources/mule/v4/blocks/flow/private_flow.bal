@@ -2,8 +2,8 @@ import ballerina/http;
 import ballerina/log;
 
 public type Attributes record {|
-    http:Request request;
-    http:Response response;
+    http:Request request?;
+    http:Response response?;
     map<string> uriParams = {};
 |};
 
@@ -15,14 +15,17 @@ public type Context record {|
 public listener http:Listener config = new (8081);
 
 service /mule4 on config {
+    function init() returns error? {
+    }
+
     resource function get flow(http:Request request) returns http:Response|error {
         Context ctx = {attributes: {request, response: new}};
         log:printInfo("xxx: logger invoked via http end point");
         demoPrivateFlow(ctx);
         log:printInfo("xxx: end of main flow");
 
-        ctx.attributes.response.setPayload(ctx.payload);
-        return ctx.attributes.response;
+        (<http:Response>ctx.attributes.response).setPayload(ctx.payload);
+        return <http:Response>ctx.attributes.response;
     }
 }
 

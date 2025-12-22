@@ -9,8 +9,8 @@ public type Vars record {|
 |};
 
 public type Attributes record {|
-    http:Request request;
-    http:Response response;
+    http:Request request?;
+    http:Response response?;
     map<string> uriParams = {};
 |};
 
@@ -37,6 +37,9 @@ mysql:Client db_config = check new (db_host, db_user, db_password, db_database, 
 public listener http:Listener listener_config = new (check int:fromString(http_port));
 
 service /mule4 on listener_config {
+    function init() returns error? {
+    }
+
     resource function get property_access(http:Request request) returns http:Response|error {
         Context ctx = {attributes: {request, response: new}};
         ctx.vars.dbConnectionString = http_host + ":" + http_port;
@@ -50,7 +53,7 @@ service /mule4 on listener_config {
         ctx.payload = dbSelect0;
         log:printInfo("Welcome, " + user_firstName + " " + user_lastName + ". Your account balance is " + user_balance);
 
-        ctx.attributes.response.setPayload(ctx.payload);
-        return ctx.attributes.response;
+        (<http:Response>ctx.attributes.response).setPayload(ctx.payload);
+        return <http:Response>ctx.attributes.response;
     }
 }

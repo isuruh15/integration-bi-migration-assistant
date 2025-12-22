@@ -2,8 +2,8 @@ import ballerina/http;
 import ballerina/log;
 
 public type Attributes record {|
-    http:Request request;
-    http:Response response;
+    http:Request request?;
+    http:Response response?;
     map<string> uriParams = {};
 |};
 
@@ -15,6 +15,9 @@ public type Context record {|
 public listener http:Listener http_listener = new (9090);
 
 service / on http_listener {
+    function init() returns error? {
+    }
+
     resource function default first_successful(http:Request request) returns http:Response|error {
         Context ctx = {attributes: {request, response: new}};
 
@@ -24,8 +27,8 @@ service / on http_listener {
 
         log:printInfo(ctx.payload.toString());
 
-        ctx.attributes.response.setPayload(ctx.payload);
-        return ctx.attributes.response;
+        (<http:Response>ctx.attributes.response).setPayload(ctx.payload);
+        return <http:Response>ctx.attributes.response;
     }
 }
 

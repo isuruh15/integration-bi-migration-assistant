@@ -39,6 +39,8 @@ public enum MuleXMLTag implements MuleXMLTagBase {
     VM_CONFIG("vm:config", 1),
     CONFIGURATION_PROPERTIES("configuration-properties", 1),
     GLOBAL_PROPERTY("global-property", 1),
+    APIKIT_CONFIG("apikit:config", 1),
+    APIKIT_ROUTER("apikit:router", 1),
 
     // Flow Control
     CHOICE("choice", 3),
@@ -96,6 +98,25 @@ public enum MuleXMLTag implements MuleXMLTagBase {
     VM_CONSUME("vm:consume", 5),
     VM_QUEUES("vm:queues", 1),
     VM_QUEUE("vm:queue", 1),
+
+    // Anypoint MQ connector
+    ANYPOINT_MQ_CONFIG("anypoint-mq:config", 3),
+    ANYPOINT_MQ_SUBSCRIBER("anypoint-mq:subscriber", 5),
+    ANYPOINT_MQ_CONNECTION("anypoint-mq:connection", 2),
+    ANYPOINT_MQ_ACK("anypoint-mq:ack", 3),
+    ANYPOINT_MQ_PUBLISH("anypoint-mq:publish", 3),
+
+    // Google Pub/Sub connector
+    PUBSUB_CONFIG("pubsub:config", 3),
+    PUBSUB_MESSAGE_LISTENER("pubsub:message-listener", 5),
+    PUBSUB_CONNECTION("pubsub:connection", 2),
+    PUBSUB_PRIVATE_KEY("pubsub:private-key", 1),
+
+    // File Connector
+    FILE_CONFIG("file:config", 3),
+    FILE_CONNECTION("file:connection", 2),
+    FILE_LISTENER("file:listener", 5),
+    FILE_MATCHER("file:matcher", 2),
 
     // Database Connector
     DB_INSERT("db:insert", 2),

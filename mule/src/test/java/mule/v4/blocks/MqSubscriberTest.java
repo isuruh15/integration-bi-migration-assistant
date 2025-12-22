@@ -1,0 +1,61 @@
+/*
+ *  Copyright (c) 2025, WSO2 LLC. (http://www.wso2.com).
+ *
+ *  WSO2 LLC. licenses this file to you under the Apache License,
+ *  Version 2.0 (the "License"); you may not use this file except
+ *  in compliance with the License.
+ *  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing,
+ *  software distributed under the License is distributed on an
+ *  "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ *  KIND, either express or implied.  See the License for the
+ *  specific language governing permissions and limitations
+ *  under the License.
+ */
+package mule.v4.blocks;
+
+import org.testng.annotations.Test;
+
+public class MqSubscriberTest extends AbstractBlockTest {
+
+    @Test
+    public void testBasicMqSubscriber() {
+        testMule4ToBal("mq-subscriber/basic_mq_subscriber.xml", "mq-subscriber/basic_mq_subscriber.bal");
+    }
+
+    @Test
+    public void testBasicMqSubscriberWithAck() {
+        testMule4ToBal("mq-subscriber/basic_mq_subscriber_ack.xml", "mq-subscriber/basic_mq_subscriber_ack.bal");
+    }
+
+    @Test
+    public void testBasicMqPublish() {
+        testMule4ToBal("mq-subscriber/basic_mq_publish.xml", "mq-subscriber/basic_mq_publish.bal");
+    }
+
+    @Test
+    public void testBasicMqPublishInService() {
+        testMule4ToBal("mq-subscriber/basic_mq_publish_service.xml", "mq-subscriber/basic_mq_publish_service.bal");
+    }
+
+    @Test
+    public void testBasicMqPublishInServiceMultipleDestinations() {
+        testMule4ToBal("mq-subscriber/basic_mq_publish_service_multiple_destinations.xml",
+                "mq-subscriber/basic_mq_publish_service_multiple_destinations.bal");
+    }
+
+    @Test
+    public void testMqPublishInHttpService() {
+        testMule4ToBal("mq-subscriber/mq_publish_in_http_service.xml",
+                "mq-subscriber/mq_publish_in_http_service.bal");
+    }
+
+    @Test
+    public void testMqPublishInApikitService() {
+        testMule4ToBal("mq-subscriber/mq_publish_in_apikit_service.xml",
+                "mq-subscriber/mq_publish_in_apikit_service.bal");
+    }
+}

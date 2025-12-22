@@ -32,6 +32,10 @@ public class Constants {
     public static final String ORG_BALLERINA = "ballerina";
     public static final String ORG_BALLERINAX = "ballerinax";
     public static final String MODULE_HTTP = "http";
+    public static final String MODULE_JMS = "java.jms";
+    public static final String MODULE_PUBSUB = "gcloud.pubsub";
+    public static final String MODULE_FILE = "file";
+    public static final String MODULE_REGEX = "regex";
     public static final String MODULE_LOG = "log";
     public static final String MODULE_TASK = "task";
     public static final String MODULE_SQL = "sql";
@@ -56,6 +60,7 @@ public class Constants {
     public static final String HTTP_RESPONSE_REF = "response";
     public static final String PAYLOAD_REF = "payload";
     public static final String URI_PARAMS_REF = "uriParams";
+    public static final String JMS_MESSAGE_REF = "jmsMessage";
     public static final String VARS_FIELD_ACCESS = CONTEXT_REFERENCE + "." + VARS_REF;
     public static final String ATTRIBUTES_FIELD_ACCESS = CONTEXT_REFERENCE + "." + ATTRIBUTES_REF;
     public static final String PAYLOAD_FIELD_ACCESS = CONTEXT_REFERENCE + "." + PAYLOAD_REF;
@@ -85,7 +90,14 @@ public class Constants {
     // Types
     public static final String HTTP_RESPONSE_TYPE = "http:Response";
     public static final String HTTP_REQUEST_TYPE = "http:Request";
+    public static final String HTTP_CLIENT_TYPE = "http:Client";
     public static final String HTTP_RESOURCE_RETURN_TYPE_DEFAULT = HTTP_RESPONSE_TYPE + "|error";
+    public static final String JMS_MESSAGE_TYPE = "jms:Message";
+    public static final String JMS_CALLER_TYPE = "jms:Caller";
+    public static final String JMS_CONNECTION_CONFIGURATION_TYPE = "jms:ConnectionConfiguration";
+    public static final String PUBSUB_MESSAGE_TYPE = "pubsub:Message";
+    public static final String PUBSUB_CALLER_TYPE = "pubsub:Caller";
+    public static final String FILE_EVENT_TYPE = "file:FileEvent";
     public static final String MYSQL_CLIENT_TYPE = "mysql:Client";
     public static final String ORACLEDB_CLIENT_TYPE = "oracledb:Client";
     public static final String JDBC_CLIENT_TYPE = "jdbc:Client";
@@ -111,4 +123,10 @@ public class Constants {
     public static final BallerinaType BAL_ERROR_TYPE = typeFrom("error");
     public static final BallerinaType BAL_HANDLE_TYPE = typeFrom("handle");
     public static final BallerinaType BAL_ANYDATA_TYPE = typeFrom("anydata");
+
+    public static final BallerinaType JMS_CONNECTION_TYPE = typeFrom("jms:Connection");
+    public static final BallerinaType JMS_SESSION_TYPE = typeFrom("jms:Session");
+    public static final BallerinaType JMS_MESSAGE_PRODUCER_TYPE = typeFrom("jms:MessageProducer");
+    public static final BallerinaType JMS_MAP_MESSAGE_TYPE = typeFrom("jms:MapMessage");
+
 }

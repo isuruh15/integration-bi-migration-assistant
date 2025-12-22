@@ -22,13 +22,21 @@ import common.BallerinaModel.TypeDesc.RecordTypeDesc;
 import common.BallerinaModel.TypeDesc.RecordTypeDesc.RecordField;
 import common.CodeGenerator;
 import io.ballerina.compiler.syntax.tree.SyntaxTree;
+import mule.common.MuleLogger;
+import mule.v4.converter.ScriptConversionException;
+import mule.v4.model.MuleModel.AnypointMqSubscriber;
+import mule.v4.model.MuleModel.ApiKitConfig;
 import mule.v4.model.MuleModel.DbConfig;
 import mule.v4.model.MuleModel.DbGenericConnection;
+import mule.v4.model.MuleModel.PubSubMessageListener;
 import mule.v4.model.MuleModel.Scheduler;
+import org.jetbrains.annotations.NotNull;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -39,9 +47,11 @@ import java.util.Set;
 import static common.BallerinaModel.BlockFunctionBody;
 import static common.BallerinaModel.ClassDef;
 import static common.BallerinaModel.Expression;
+import static common.BallerinaModel.Expression.VariableReference;
 import static common.BallerinaModel.Function;
 import static common.BallerinaModel.Import;
 import static common.BallerinaModel.Listener;
+import static common.BallerinaModel.Remote;
 import static common.BallerinaModel.ModuleTypeDef;
 import static common.BallerinaModel.ModuleVar;
 import static common.BallerinaModel.Parameter;
@@ -50,10 +60,15 @@ import static common.BallerinaModel.Service;
 import static common.BallerinaModel.Statement;
 import static common.BallerinaModel.TextDocument;
 import static common.BallerinaModel.TypeDesc;
+import static common.ConversionUtils.escapeIdentifier;
 import static common.ConversionUtils.exprFrom;
 import static common.ConversionUtils.stmtFrom;
 import static common.ConversionUtils.typeFrom;
 import static mule.v4.Constants.BAL_ANYDATA_TYPE;
+import static mule.v4.Constants.HTTP_RESPONSE_TYPE;
+import static mule.v4.Constants.JMS_CONNECTION_CONFIGURATION_TYPE;
+import static mule.v4.Constants.JMS_MESSAGE_REF;
+import static mule.v4.ConversionUtils.convertToBalIdentifier;
 import static mule.v4.ConversionUtils.getAttrVal;
 import static mule.v4.ConversionUtils.getAttrValInt;
 import static mule.v4.ConversionUtils.getBallerinaAbsolutePath;
@@ -65,6 +80,8 @@ import static mule.v4.model.MuleModel.DbConnection;
 import static mule.v4.model.MuleModel.DbMySqlConnection;
 import static mule.v4.model.MuleModel.DbOracleConnection;
 import static mule.v4.model.MuleModel.ErrorHandler;
+import static mule.v4.model.MuleModel.FileConfig;
+import static mule.v4.model.MuleModel.FileListener;
 import static mule.v4.model.MuleModel.Flow;
 import static mule.v4.model.MuleModel.GlobalProperty;
 import static mule.v4.model.MuleModel.HTTPListenerConfig;
@@ -77,7 +94,7 @@ import static mule.v4.model.MuleModel.VMListener;
 
 public class MuleToBalConverter {
 
-    public static SyntaxTree convertStandaloneXMLFileToBallerina(String xmlFilePath, mule.common.MuleLogger logger) {
+    public static SyntaxTree convertStandaloneXMLFileToBallerina(String xmlFilePath, MuleLogger logger) {
         Context ctx = new Context(List.of(Path.of(xmlFilePath).toFile()), List.of(), logger);
         ctx.parseAllFiles();
         TextDocument txtDoc = ctx.codeGen().getFirst();
@@ -85,31 +102,50 @@ public class MuleToBalConverter {
     }
 
     public static TextDocument generateTextDocument(Context ctx, String balFileName,
-                                                    List<Flow> flows, List<SubFlow> subFlows) {
+                                                    List<Flow> flows, List<SubFlow> subFlows)
+            throws ScriptConversionException {
         List<Service> services = new ArrayList<>();
         Set<Function> functions = new HashSet<>();
         List<ClassDef> classDefs = new ArrayList<>();
         List<Flow> privateFlows = new ArrayList<>();
+        List<Listener> listeners = new ArrayList<>();
 
-        for (Flow flow : flows) {
-            Optional<MuleRecord> source = flow.source();
-            if (source.isEmpty()) {
-                privateFlows.add(flow);
-                continue;
-            }
+        flows.stream()
+                .sorted(Comparator.comparing(flow -> {
+                    Optional<MuleRecord> source = flow.source();
+                    return !(source.isPresent() && source.get() instanceof HttpListener);
+                }))
+                .forEachOrdered(flow -> {
+                    Optional<MuleRecord> source = flow.source();
+                    if (source.isEmpty()) {
+                        privateFlows.add(flow);
+                        return;
+                    }
 
-            MuleRecord src = source.get();
-            if (src.kind() == Kind.VM_LISTENER) {
-                genVMListenerSource(ctx, flow, (VMListener) src, functions);
-            } else if (src.kind() == Kind.SCHEDULER) {
-                genSchedulerSource(ctx, flow, (Scheduler) src, functions, classDefs);
-            } else {
-                assert src.kind() == Kind.HTTP_LISTENER;
-                genHttpSource(ctx, flow, (HttpListener) src, services, functions);
-            }
-        }
+                    MuleRecord src = source.get();
+                    try {
+                        switch (src) {
+                            case VMListener vmListener -> genVMListenerSource(ctx, flow, vmListener, functions);
+                            case Scheduler scheduler -> genSchedulerSource(ctx, flow, scheduler, functions, classDefs);
+                            case HttpListener httpListener -> ctx.projectCtx.lastHttpService = genHttpSource(ctx, flow,
+                                    httpListener, services, functions);
+                            case ApiKitConfig apiKit ->
+                                    genApiKitSource(ctx, flow, apiKit, services, ctx.projectCtx.lastHttpService);
+                            case AnypointMqSubscriber mqSubscriber ->
+                                    genAnypointMqSource(ctx, flow, mqSubscriber, services, listeners);
+                            case PubSubMessageListener pubSubListener ->
+                                    genPubSubSource(ctx, flow, pubSubListener, services, listeners);
+                            case FileListener fileListener ->
+                                    genFileListenerSource(ctx, flow, fileListener, services, listeners);
+                            default -> throw new IllegalStateException(
+                                    "Unsupported source kind: %s".formatted(src.kind()));
+                        }
+                    } catch (ScriptConversionException e) {
+                        throw new RuntimeException(e);
+                    }
+                });
 
-        services = normalizeServices(services);
+        List<Service> normalizeServices = normalizeServices(services);
 
         // Create functions for private flows
         genBalFuncsFromPrivateFlows(ctx, privateFlows, functions);
@@ -122,13 +158,12 @@ public class MuleToBalConverter {
         // Create functions for global exception strategies
         for (ErrorHandler errorHandler : ctx.currentFileCtx.configs.globalErrorHandlers) {
             genBalFuncForGlobalErrorHandler(ctx, errorHandler, functions);
-            functions.addAll(ctx.currentFileCtx.balConstructs.functions); // TODO: this is a  hack.
+            functions.addAll(ctx.currentFileCtx.balConstructs.functions); // TODO: this is a hack.
         }
 
-        // Add global listeners
-        List<Listener> listeners = new ArrayList<>();
+        // Add global HTTP listeners from configs
         for (HTTPListenerConfig httpListenerConfig : ctx.currentFileCtx.configs.httpListenerConfigs.values()) {
-            listeners.add(new Listener.HTTPListener(ConversionUtils.convertToBalIdentifier(httpListenerConfig.name()),
+            listeners.add(new Listener.HTTPListener(convertToBalIdentifier(httpListenerConfig.name()),
                     getAttrValInt(ctx, httpListenerConfig.port()), httpListenerConfig.host()));
         }
 
@@ -167,7 +202,7 @@ public class MuleToBalConverter {
             }
 
             moduleVars
-                    .add(new ModuleVar(ConversionUtils.convertToBalIdentifier(dbConfig.name()), dbClientType, balExpr));
+                    .add(new ModuleVar(convertToBalIdentifier(dbConfig.name()), dbClientType, balExpr));
         }
 
         moduleVars.addAll(ctx.currentFileCtx.balConstructs.moduleVars.values());
@@ -194,11 +229,328 @@ public class MuleToBalConverter {
         }
 
         ArrayList<ModuleVar> orderedModuleVars = new ArrayList<>(
-                ctx.getCurrentFileConfigurableVars()
-        );
+                ctx.getCurrentFileConfigurableVars());
         orderedModuleVars.addAll(moduleVars);
         return createTextDocument(balFileName + ".bal", new ArrayList<>(ctx.currentFileCtx.balConstructs.imports),
-                typeDefs, orderedModuleVars, listeners, services, classDefs, functions.stream().toList(), comments);
+                typeDefs, orderedModuleVars, listeners, normalizeServices, classDefs, functions.stream().toList(),
+                comments);
+    }
+
+    private static void genApiKitSource(Context ctx, Flow flow, ApiKitConfig apiKit, Collection<Service> services,
+                                        Service lastHttpService) {
+        ctx.inServiceGen = true;
+        // TODO: Common with httpSource refactor
+        ctx.projectCtx.attributes.put(Constants.HTTP_REQUEST_REF, Constants.HTTP_REQUEST_TYPE);
+        ctx.projectCtx.attributes.put(Constants.HTTP_RESPONSE_REF, HTTP_RESPONSE_TYPE);
+        ctx.projectCtx.attributes.put(Constants.URI_PARAMS_REF, "map<string>");
+
+        if (lastHttpService == null) {
+            throw new IllegalStateException("API Kit flow %s requires an HTTP listener to be processed first"
+                    .formatted(flow.name()));
+        }
+
+        ApiKitConfig.HTTPResourceData resourceData = apiKit.resourcePathData(flow);
+        List<String> pathParams = resourceData.pathParams();
+        String apiKitResourcePath = resourceData.resourcePath();
+        String resourceMethod = resourceData.method();
+
+        // Get paths: serviceBasePath + apiKitBasePath + resourcePath
+        String httpBasePath = lastHttpService.basePath();
+        String apiKitBasePath = ctx.getApiKitBasePath(apiKit);
+        String combinedResourcePath = concatenatePaths(
+                concatenatePaths(httpBasePath, apiKitBasePath),
+                apiKitResourcePath);
+
+        // Store paths in context for apikit:router redirect logic
+        ctx.currentServiceBasePath = httpBasePath;
+        ctx.currentApiKitBasePath = apiKitBasePath;
+        ctx.currentResourcePath = combinedResourcePath;
+        HTTPListenerConfig listenerConfig = ctx.getDefaultHttpListenerConfig();
+        ctx.currentListenerPort = listenerConfig.port();
+
+        List<Parameter> queryPrams = new ArrayList<>();
+        queryPrams.add(new Parameter(Constants.HTTP_REQUEST_REF, typeFrom(Constants.HTTP_REQUEST_TYPE)));
+
+        List<Statement> bodyStmts = new ArrayList<>();
+        String attributesInitValue = getAttributesInitValue(ctx, pathParams);
+        bodyStmts.add(stmtFrom("Context %s = {%s: %s};".formatted(Constants.CONTEXT_REFERENCE,
+                Constants.ATTRIBUTES_REF, attributesInitValue)));
+
+        List<Statement> bodyCoreStmts = convertTopLevelMuleBlocks(ctx, flow.flowBlocks());
+        bodyStmts.addAll(bodyCoreStmts);
+
+        // Add return statement
+        bodyStmts.add(stmtFrom("\n\n(<%s>%s.%s).setPayload(%s.payload);".formatted(HTTP_RESPONSE_TYPE,
+                Constants.ATTRIBUTES_FIELD_ACCESS, Constants.HTTP_RESPONSE_REF, Constants.CONTEXT_REFERENCE)));
+        bodyStmts.add(
+                stmtFrom("return <%s>%s.%s;".formatted(HTTP_RESPONSE_TYPE, Constants.ATTRIBUTES_FIELD_ACCESS,
+                        Constants.HTTP_RESPONSE_REF)));
+
+        // Add service resources
+        TypeDesc returnType = typeFrom(Constants.HTTP_RESOURCE_RETURN_TYPE_DEFAULT);
+        ctx.currentFileCtx.balConstructs.imports.add(Constants.HTTP_MODULE_IMPORT);
+
+        Resource resource = new Resource(resourceMethod, combinedResourcePath, queryPrams, Optional.of(returnType),
+                bodyStmts);
+        lastHttpService.resources().add(resource);
+        lastHttpService.initFunc().map(initFn -> switch (initFn.body()) {
+            case BlockFunctionBody blockFunctionBody -> blockFunctionBody.statements().addAll(ctx.initFunctionBody);
+            default -> throw new IllegalStateException("Unexpected value: " + initFn.body());
+        });
+        lastHttpService.fields().addAll(ctx.serviceFields);
+        ctx.resetServiceState();
+    }
+
+    private static void genAnypointMqSource(Context ctx, Flow flow, AnypointMqSubscriber mqSubscriber,
+                                            Collection<Service> services, List<Listener> listeners) {
+        ctx.inServiceGen = true;
+        ctx.projectCtx.attributes.put(Constants.URI_PARAMS_REF, "map<string>");
+        ctx.projectCtx.attributes.put(JMS_MESSAGE_REF, Constants.JMS_MESSAGE_TYPE);
+
+        // Add JMS import
+        ctx.currentFileCtx.balConstructs.imports.add(new Import(Constants.ORG_BALLERINAX, Constants.MODULE_JMS));
+
+        // Add configurable variable for JMS provider URL (null value generates "?")
+        String jmsProviderUrlVar = "JMS_PROVIDER_URL";
+        ConversionUtils.addConfigVarEntry(ctx, jmsProviderUrlVar, null);
+
+        String serviceName = "\"" + escapeIdentifier(mqSubscriber.configRef()) + "\"";
+
+        String listenerName = convertToBalIdentifier(mqSubscriber.configRef());
+        // Listener name from config-ref
+        VariableReference jmsListenerConfig =
+                getJmsConnectionConfig(ctx, new VariableReference(jmsProviderUrlVar), mqSubscriber.configRef());
+
+        // Create JMS Listener using the BallerinaModel
+        Listener.JMSListener jmsListener =
+                new Listener.JMSListener(listenerName, () -> jmsListenerConfig,
+                        mqSubscriber.destination());
+        listeners.add(jmsListener);
+
+        Parameter message = new Parameter("message", typeFrom(Constants.JMS_MESSAGE_TYPE));
+        Parameter caller = new Parameter("caller", typeFrom(Constants.JMS_CALLER_TYPE));
+        ctx.jmsCaller = caller.ref();
+        // Convert flow blocks to statements
+        List<Statement> bodyStmts = new ArrayList<>();
+        String attributesInitValue = "{ %s: %s }".formatted(JMS_MESSAGE_REF, message.ref());
+        bodyStmts.add(stmtFrom("Context %s = {%s: %s};".formatted(Constants.CONTEXT_REFERENCE,
+                Constants.ATTRIBUTES_REF, attributesInitValue)));
+        bodyStmts.addAll(convertTopLevelMuleBlocks(ctx, flow.flowBlocks()));
+
+        List<Parameter> params = List.of(message, caller);
+
+        Function onMessageFunction =
+                new Function("onMessage", params, TypeDesc.UnionTypeDesc.of(TypeDesc.BuiltinType.ERROR,
+                        TypeDesc.BuiltinType.NIL), bodyStmts);
+        Remote remoteFunction = new Remote(onMessageFunction);
+
+        // Create service with listener reference
+        Service service = new Service(serviceName, List.of(listenerName), ctx.getServiceInitFunction(),
+                List.of(), List.of(), new ArrayList<>(ctx.serviceFields), List.of(remoteFunction),
+                Optional.of(new Statement.Comment(
+                        "TODO: placeholder jms listener for %s".formatted(mqSubscriber.configRef()))));
+        services.add(service);
+        ctx.resetServiceState();
+    }
+
+    public static @NotNull VariableReference getJmsConnectionConfig(Context ctx,
+                                                                    VariableReference providerUrl,
+                                                                    String mqConfigRef) {
+        return ctx.projectCtx.jmsConnectionConfig.computeIfAbsent(mqConfigRef, (configRef) -> {
+            String jmsListenerConfigName = ConversionUtils.convertToBalIdentifier(configRef) + "Config";
+            ctx.currentFileCtx.balConstructs.moduleVars.put(jmsListenerConfigName,
+                    new ModuleVar(jmsListenerConfigName,
+                            typeFrom(JMS_CONNECTION_CONFIGURATION_TYPE),
+                            new Expression.MappingConstructor(List.of(
+                                    new Expression.MappingConstructor.MappingField("initialContextFactory",
+                                            new Expression.StringConstant(
+                                                    "org.apache.activemq.jndi.ActiveMQInitialContextFactory")),
+                                    new Expression.MappingConstructor.MappingField("providerUrl",
+                                            providerUrl)
+                            ))));
+            return new VariableReference(jmsListenerConfigName);
+        });
+    }
+
+    private static void genPubSubSource(Context ctx, Flow flow, PubSubMessageListener pubSubListener,
+                                        Collection<Service> services, List<Listener> listeners) {
+        ctx.projectCtx.attributes.put(Constants.URI_PARAMS_REF, "map<string>");
+        ctx.inServiceGen = true;
+
+        // Add Pub/Sub import
+        ctx.addImport(new Import(Constants.ORG_BALLERINAX, Constants.MODULE_PUBSUB));
+
+        // Add configurable variables (null value generates "?")
+        String projectIdVar = "projectId";
+        String credentialsPathVar = "credentialsPath";
+        String subscriptionNameVar = "subscriptionName";
+        ConversionUtils.addConfigVarEntry(ctx, projectIdVar, null);
+        ConversionUtils.addConfigVarEntry(ctx, credentialsPathVar, null);
+        String subscriptionName = null;
+        if (pubSubListener.subscriptionName() != null && !pubSubListener.subscriptionName().isBlank()) {
+            subscriptionName = pubSubListener.subscriptionName();
+        }
+        ConversionUtils.addConfigVarEntry(ctx, subscriptionNameVar, subscriptionName);
+
+        String listenerName = escapeIdentifier(pubSubListener.configRef());
+
+        // Create Pub/Sub Listener using the BallerinaModel
+        Listener.PubSubListener pubSubListenerBal = new Listener.PubSubListener(
+                listenerName,
+                new VariableReference(subscriptionNameVar),
+                new VariableReference(projectIdVar),
+                new VariableReference(credentialsPathVar));
+        listeners.add(pubSubListenerBal);
+
+        // Convert flow blocks to statements
+        List<Statement> bodyStmts = new ArrayList<>();
+        String attributesInitValue = "{}";
+        bodyStmts.add(stmtFrom("Context %s = {%s: %s};".formatted(Constants.CONTEXT_REFERENCE,
+                Constants.ATTRIBUTES_REF, attributesInitValue)));
+        bodyStmts.addAll(convertTopLevelMuleBlocks(ctx, flow.flowBlocks()));
+
+        // Create remote function for onMessage with two parameters
+        List<Parameter> params = new ArrayList<>();
+        params.add(new Parameter("message", typeFrom(Constants.PUBSUB_MESSAGE_TYPE)));
+        params.add(new Parameter("caller", typeFrom(Constants.PUBSUB_CALLER_TYPE)));
+
+        Function onMessageFunction = new Function("onMessage", params, bodyStmts);
+        Remote remoteFunction = new Remote(onMessageFunction);
+
+        // Create service with listener reference
+        Service service = new Service("", List.of(listenerName), ctx.getServiceInitFunction(),
+                List.of(), List.of(), new ArrayList<>(ctx.serviceFields), List.of(remoteFunction),
+                Optional.of(new Statement.Comment(
+                        "TODO: placeholder listener for %s".formatted(pubSubListener.configRef()))));
+        ctx.resetServiceState();
+        services.add(service);
+    }
+
+    private static void genFileListenerSource(Context ctx, Flow flow, FileListener fileListener,
+                                              Collection<Service> services, List<Listener> listeners) {
+        ctx.inServiceGen = true;
+        ctx.projectCtx.attributes.put(Constants.URI_PARAMS_REF, "map<string>");
+
+        // Add file and regex imports
+        ctx.addImport(new Import(Constants.ORG_BALLERINA, Constants.MODULE_FILE));
+
+        // Get file config to retrieve workingDir
+        FileConfig fileConfig = ctx.projectCtx.getFileConfig(fileListener.configRef());
+        if (fileConfig == null) {
+            ctx.logger.logSevere("failed to find the file config: " + fileListener.configRef());
+        }
+
+        String workingDirVar = convertToBalIdentifier(fileListener.configRef() + "WorkingDir");
+        ConversionUtils.addConfigVarEntry(ctx, workingDirVar, fileConfig != null ? fileConfig.workingDir() : null);
+
+        String listenerName = convertToBalIdentifier(fileListener.configRef());
+
+        // Create File Listener using the BallerinaModel.FileListener
+        Listener.FileListener fileListenerBal = new Listener.FileListener(
+                listenerName,
+                new VariableReference(workingDirVar),
+                false);
+        listeners.add(fileListenerBal);
+
+        String flowFuncName = createFlowFunction(ctx, flow);
+
+        List<String> todoComments = fileListenerTodoComments(fileListener);
+
+        // Create service body with onCreate, onDelete, onModify remote functions
+        List<Remote> remoteFunctions = new ArrayList<>();
+
+        // Check if we need regex matching
+        boolean hasFilenamePattern = fileListener.matcher() != null
+                && fileListener.matcher().filenamePattern() != null
+                && !fileListener.matcher().filenamePattern().isEmpty();
+
+        if (hasFilenamePattern) {
+            ctx.addImport(new Import(Constants.ORG_BALLERINA, Constants.MODULE_REGEX));
+        }
+
+        // Generate each remote function (onCreate, onModify)
+        for (String eventType : new String[]{"onCreate", "onModify"}) {
+            List<Statement> remoteBody = new ArrayList<>();
+            remoteBody.add(stmtFrom("Context %s = { %s : {}};".formatted(
+                    Constants.CONTEXT_REFERENCE, Constants.ATTRIBUTES_REF)));
+
+            Parameter event = new Parameter("event", typeFrom(Constants.FILE_EVENT_TYPE));
+            Statement.CallStatement flowCall = new Statement.CallStatement(
+                    new Expression.FunctionCall(flowFuncName,
+                            List.of(new VariableReference(Constants.CONTEXT_REFERENCE))));
+            if (hasFilenamePattern) {
+                String pattern = getFileNamePattern(fileListener);
+                remoteBody.add(Statement.IfElseStatement.ifStatement(
+                        new Expression.FunctionCall("regex:matches",
+                                List.of(new Expression.FieldAccess(event.ref(), "name"),
+                                        new Expression.StringConstant(pattern))),
+                        List.of(flowCall)));
+            } else {
+                remoteBody.add(flowCall);
+            }
+
+            Function remoteFunc = new Function(eventType, List.of(event), remoteBody);
+            remoteFunctions.add(new Remote(remoteFunc));
+        }
+
+        Optional<Statement.Comment> serviceComment = todoComments.isEmpty()
+                ? Optional.empty()
+                : Optional.of(new Statement.Comment(String.join("\n", todoComments)));
+
+        // Create service with listener reference
+        Service service = new Service("", List.of(listenerName), ctx.getServiceInitFunction(),
+                List.of(), List.of(), new ArrayList<>(ctx.serviceFields), remoteFunctions, serviceComment);
+        ctx.resetServiceState();
+        services.add(service);
+    }
+
+    private static String getFileNamePattern(FileListener fileListener) {
+        return ConversionUtils.convertGlobToRegex(fileListener.matcher().filenamePattern());
+    }
+
+    private static @NotNull List<String> fileListenerTodoComments(FileListener fileListener) {
+        List<String> todoComments = new ArrayList<>();
+        if (fileListener.schedulingStrategy() != null) {
+            todoComments.add(String.format("TODO: scheduling-strategy not supported (frequency: %s, timeUnit: %s)",
+                    fileListener.schedulingStrategy().frequency(),
+                    fileListener.schedulingStrategy().timeUnit()));
+        }
+        if (fileListener.autoDelete() != null && !fileListener.autoDelete().isEmpty()) {
+            todoComments.add("TODO: autoDelete attribute not supported: " + fileListener.autoDelete());
+        }
+        if (fileListener.outputMimeType() != null && !fileListener.outputMimeType().isEmpty()) {
+            todoComments.add("TODO: outputMimeType attribute not supported: " + fileListener.outputMimeType());
+        }
+        if (fileListener.directory() != null && !fileListener.directory().isEmpty()) {
+            todoComments.add("TODO: directory attribute not supported: " + fileListener.directory());
+        }
+        return todoComments;
+    }
+
+    private static @NotNull String createFlowFunction(Context ctx, Flow flow) {
+        String flowFuncName = convertToBalIdentifier(flow.name());
+        List<Statement> flowBody = convertTopLevelMuleBlocks(ctx, flow.flowBlocks());
+        Function flowFunction = Function.publicFunction(flowFuncName, Constants.FUNC_PARAMS_WITH_CONTEXT, flowBody);
+        ctx.currentFileCtx.balConstructs.functions.add(flowFunction);
+        return flowFuncName;
+    }
+
+    private static String concatenatePaths(String basePath, String resourcePath) {
+        // Normalize paths by removing trailing slashes from basePath and leading slashes from resourcePath
+        String normalizedBasePath = basePath.endsWith("/") ? basePath.substring(0, basePath.length() - 1) : basePath;
+        String normalizedResourcePath = resourcePath.startsWith("/") ? resourcePath : "/" + resourcePath;
+
+        // Handle root basePath case
+        if (normalizedBasePath.equals("/") || normalizedBasePath.isEmpty()) {
+            return normalizedResourcePath;
+        }
+
+        String normaizedPath = normalizedBasePath + normalizedResourcePath;
+        while (normaizedPath.startsWith("/")) {
+            normaizedPath = normaizedPath.substring(1);
+        }
+
+        return normaizedPath;
     }
 
     private static List<Service> normalizeServices(List<Service> services) {
@@ -220,7 +572,7 @@ public class MuleToBalConverter {
         String queueName = vmListener.queueName();
         String funcName = ctx.projectCtx.vmQueueNameToBalFuncMap.get(queueName);
         if (funcName == null) {
-            funcName = ConversionUtils.convertToBalIdentifier(flow.name());
+            funcName = convertToBalIdentifier(flow.name());
             ctx.projectCtx.vmQueueNameToBalFuncMap.put(queueName, funcName);
         }
         genBalFunc(ctx, functions, funcName, flow.flowBlocks());
@@ -267,15 +619,17 @@ public class MuleToBalConverter {
         return new ClassDef(jobName, List.of(typeFrom("task:Job")), List.of(), List.of(executeFunc));
     }
 
-    private static void genHttpSource(Context ctx, Flow flow, HttpListener src, List<Service> services,
-                                      Set<Function> functions) {
+    private static Service genHttpSource(Context ctx, Flow flow, HttpListener src, List<Service> services,
+                                         Set<Function> functions)
+            throws ScriptConversionException {
         ctx.projectCtx.attributes.put(Constants.HTTP_REQUEST_REF, Constants.HTTP_REQUEST_TYPE);
-        ctx.projectCtx.attributes.put(Constants.HTTP_RESPONSE_REF, Constants.HTTP_RESPONSE_TYPE);
+        ctx.projectCtx.attributes.put(Constants.HTTP_RESPONSE_REF, HTTP_RESPONSE_TYPE);
         ctx.projectCtx.attributes.put(Constants.URI_PARAMS_REF, "map<string>");
 
         // Create a service from the flow
         Service service = genBalService(ctx, src, flow.flowBlocks(), functions);
         services.add(service);
+        return service;
     }
 
     public static List<ModuleTypeDef> createContextTypeDefns(Context ctx) {
@@ -307,7 +661,7 @@ public class MuleToBalConverter {
                 if (type.startsWith("map<") && type.endsWith(">")) {
                     attributesField = new RecordField(name, typeFrom(type), exprFrom("{}"));
                 } else {
-                    attributesField = new RecordField(name, typeFrom(type), false);
+                    attributesField = new RecordField(name, typeFrom(type), true);
                 }
                 attributesRecordFields.add(attributesField);
             }
@@ -324,7 +678,7 @@ public class MuleToBalConverter {
                                                         Set<Function> functions) {
         String name = errorHandler.name();
         String methodName = errorHandler.name().isEmpty() ? "errorHandler" :
-                ConversionUtils.convertToBalIdentifier(name); // Ideally field will not be empty
+                convertToBalIdentifier(name); // Ideally field will not be empty
 
         List<Parameter> parameters = new ArrayList<>();
         parameters.add(Constants.CONTEXT_FUNC_PARAM);
@@ -344,7 +698,7 @@ public class MuleToBalConverter {
     private static void genBalFuncForPrivateOrSubFlow(Context ctx, Set<Function> functions, String flowName,
                                                       List<MuleRecord> flowBlocks) {
         List<Statement> body = convertTopLevelMuleBlocks(ctx, flowBlocks);
-        String methodName = ConversionUtils.convertToBalIdentifier(flowName);
+        String methodName = convertToBalIdentifier(flowName);
         Function function = Function.publicFunction(methodName, Constants.FUNC_PARAMS_WITH_CONTEXT, body);
         functions.add(function);
     }
@@ -362,13 +716,15 @@ public class MuleToBalConverter {
     }
 
     private static Service genBalService(Context ctx, HttpListener httpListener, List<MuleRecord> flowBlocks,
-                                         Set<Function> functions) {
+                                         Set<Function> functions)
+            throws ScriptConversionException {
+        ctx.inServiceGen = true;
         List<String> pathParams = new ArrayList<>();
         String resourcePath = getBallerinaResourcePath(ctx, httpListener.resourcePath(), pathParams);
         String[] resourceMethodNames = httpListener.allowedMethods();
-        String listenerRef = ConversionUtils.convertToBalIdentifier(httpListener.configRef());
-        String muleBasePath = insertLeadingSlash(
-                ctx.projectCtx.getHttpListenerConfig(httpListener.configRef()).basePath());
+        String listenerRef = convertToBalIdentifier(httpListener.configRef());
+        HTTPListenerConfig listenerConfig = ctx.projectCtx.getHttpListenerConfig(httpListener.configRef());
+        String muleBasePath = insertLeadingSlash(listenerConfig.basePath());
         String basePath = getBallerinaAbsolutePath(muleBasePath);
 
         // Add services
@@ -380,13 +736,18 @@ public class MuleToBalConverter {
         bodyStmts.add(stmtFrom("Context %s = {%s: %s};".formatted(Constants.CONTEXT_REFERENCE,
                 Constants.ATTRIBUTES_REF, attributesInitValue)));
 
+        // Set context for apikit-router comment generation
+        ctx.currentServiceBasePath = basePath;
+        ctx.currentResourcePath = resourcePath;
+        ctx.currentListenerPort = listenerConfig.port();
+
         List<Statement> bodyCoreStmts = convertTopLevelMuleBlocks(ctx, flowBlocks);
         bodyStmts.addAll(bodyCoreStmts);
 
         // Add return statement
-        bodyStmts.add(stmtFrom("\n\n%s.%s.setPayload(%s.payload);".formatted(Constants.ATTRIBUTES_FIELD_ACCESS,
-                        Constants.HTTP_RESPONSE_REF, Constants.CONTEXT_REFERENCE)));
-        bodyStmts.add(stmtFrom("return %s.%s;".formatted(Constants.ATTRIBUTES_FIELD_ACCESS,
+        bodyStmts.add(stmtFrom("\n\n(<%s>%s.%s).setPayload(%s.payload);".formatted(HTTP_RESPONSE_TYPE,
+                Constants.ATTRIBUTES_FIELD_ACCESS, Constants.HTTP_RESPONSE_REF, Constants.CONTEXT_REFERENCE)));
+        bodyStmts.add(stmtFrom("return <%s>%s.%s;".formatted(HTTP_RESPONSE_TYPE, Constants.ATTRIBUTES_FIELD_ACCESS,
                 Constants.HTTP_RESPONSE_REF)));
 
         // Add service resources
@@ -421,7 +782,12 @@ public class MuleToBalConverter {
             throw new IllegalStateException();
         }
 
-        return new Service(basePath, listenerRef, resources);
+        Service service =
+                new Service(basePath, List.of(listenerRef), ctx.getServiceInitFunction(), resources, List.of(),
+                        new ArrayList<>(ctx.serviceFields),
+                        List.of(), Optional.empty());
+        ctx.resetServiceState();
+        return service;
     }
 
     private static String getAttributesInitValue(Context ctx, List<String> pathParams) {
@@ -437,6 +803,7 @@ public class MuleToBalConverter {
                         attributesPropMap.put(Constants.URI_PARAMS_REF, "{%s}".formatted(pathParamValue));
                     }
                 }
+                case JMS_MESSAGE_REF -> attributesPropMap.put(JMS_MESSAGE_REF, JMS_MESSAGE_REF);
                 default -> throw new IllegalStateException();
             }
         }
