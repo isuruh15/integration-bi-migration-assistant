@@ -31,10 +31,9 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
-import java.util.HashMap;
-import java.util.Map;
-import java.util.Objects;
-import java.util.Optional;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.*;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -104,7 +103,7 @@ public class CodeGenerationUtils {
             logger.printInfo(fileName, "✓ Execution plan generated");
 
             // Step 2: Generate code
-            logger.updateProgress(fileName, 2, "Generating code");
+//            logger.updateProgress(fileName, 2, "Generating code");
             GeneratedCode generatedCode = generateCode(copilotAccessToken, sourceFiles, fileAttachmentContents,
                     packageName, generatedPrompt, logger, fileName);
             logger.printVerboseInfo(fileName, "Generated files count: " + generatedCode.codeMap.size());
@@ -375,6 +374,8 @@ public class CodeGenerationUtils {
         StringBuilder responseContent = new StringBuilder();
         long totalBytesRead = 0;
 
+        System.out.println(LocalDateTime.now().format(DateTimeFormatter.ofPattern("HHmmss")) + " Response Lines: start");
+
         try (InputStream inputStream = lines;
              BufferedReader reader = new BufferedReader(new InputStreamReader(inputStream, StandardCharsets.UTF_8))) {
 
@@ -387,6 +388,7 @@ public class CodeGenerationUtils {
                     }
                 } catch (IOException e) {
                     // treat premature close as end-of-stream
+                    System.out.println("Stream premature closed. read error: " + e.getMessage());
                     logger.printVerboseInfo(fileName, "Stream ended unexpectedly, treating as EOF");
                     break;
                 }
@@ -427,6 +429,7 @@ public class CodeGenerationUtils {
         int index = 0;
         while (index < length) {
             String line = linesArr[index];
+            System.out.println(line);
 
             if (line.isBlank()) {
                 index++;
@@ -450,6 +453,7 @@ public class CodeGenerationUtils {
             }
 
             index++;
+            System.out.println(LocalDateTime.now().format(DateTimeFormatter.ofPattern("HHmmss")) + " Response Lines: End");
         }
 
         logger.printVerboseInfo(fileName, "Response parsing completed");
@@ -467,6 +471,8 @@ public class CodeGenerationUtils {
 
     private static Map<String, String> extractGeneratedCodeFromResponse(String generatedResponseBody) {
         Map<String, String> generatedCodeMap = new HashMap<>();
+        System.out.println("[XML Parsing]Generated Response Body:");
+        System.out.println(generatedResponseBody);
 
         // Pattern to match the code blocks with filename and content
         // Captures: filename and the code content between triple backticks
